@@ -1,0 +1,201 @@
+name: "Preview Changes"
+description: "Runs dry-run command and posts diff as a GitHub comment"
+
+inputs:
+  version:
+    description: "Release version to preview"
+    required: true
+  environment:
+    description: "Environment name"
+    required: true
+  installation:
+    description: "Installation name"
+    required: true
+  ryvn_client_id:
+    description: "Ryvn Client ID for authentication"
+    required: true
+  ryvn_client_secret:
+    description: "Ryvn Client Secret for authentication"
+    required: true
+  github_token:
+    description: "GitHub token for posting comments"
+    required: true
+  update_comment:
+    description: "Update existing preview comment instead of creating new one"
+    required: false
+    default: "true"
+  timeout:
+    description: "Timeout for watching task (e.g., 10m, 30s)"
+    required: false
+    default: "10m"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Ryvn CLI
+      uses: ryvn-technologies/install-ryvn-cli@v1.0.0
+
+    - name: Run Dry-Run Command
+      id: dryrun
+      shell: bash
+      env:
+        RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
+        RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
+      run: |
+        set +e  # Don't exit on error, capture exit code
+
+        # Build dry-run command with JSON output and watching
+        cmd="ryvn run command dry-run -e ${{ inputs.environment }} -i ${{ inputs.installation }} --version ${{ inputs.version }} --output json --timeout ${{ inputs.timeout }}"
+
+        echo "Executing: $cmd"
+
+        # Run command and capture output
+        output_file=$(mktemp)
+        $cmd > "$output_file" 2>&1
+        exit_code=$?
+
+        # Read output
+        output=$(cat "$output_file")
+        rm "$output_file"
+
+        echo "Exit code: $exit_code"
+
+        # Save raw output
+        echo "$output" > dry-run-output.json
+
+        # Parse JSON output
+        if echo "$output" | jq . > /dev/null 2>&1; then
+          # Valid JSON
+          status=$(echo "$output" | jq -r '.status // "UNKNOWN"')
+          duration=$(echo "$output" | jq -r '.duration // "unknown"')
+          task_id=$(echo "$output" | jq -r '.taskId // ""')
+
+          echo "status=$status" >> $GITHUB_OUTPUT
+          echo "duration=$duration" >> $GITHUB_OUTPUT
+          echo "task_id=$task_id" >> $GITHUB_OUTPUT
+
+          # Extract logs
+          logs=$(echo "$output" | jq -r '.logs // []')
+          log_count=$(echo "$logs" | jq 'length')
+
+          if [ "$log_count" -gt 0 ]; then
+            # Combine all log messages (keep ANSI codes)
+            diff_output=$(echo "$logs" | jq -r '.[].message')
+
+            # Save to file
+            echo "$diff_output" > diff-output.txt
+
+            # Check size and truncate if needed
+            char_count=$(echo "$diff_output" | wc -c)
+            if [ "$char_count" -gt 60000 ]; then
+              echo "$diff_output" | head -c 60000 > diff-output-truncated.txt
+              echo "" >> diff-output-truncated.txt
+              echo "... (output truncated, total size: $char_count characters)" >> diff-output-truncated.txt
+              echo "is_truncated=true" >> $GITHUB_OUTPUT
+            else
+              cp diff-output.txt diff-output-truncated.txt
+              echo "is_truncated=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "No changes detected" > diff-output-truncated.txt
+            echo "is_truncated=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Check if task completed successfully
+          if [ "$status" = "COMPLETED" ]; then
+            echo "has_error=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_error=true" >> $GITHUB_OUTPUT
+          fi
+        else
+          # Not valid JSON, likely an error
+          echo "has_error=true" >> $GITHUB_OUTPUT
+          echo "status=ERROR" >> $GITHUB_OUTPUT
+          echo "duration=unknown" >> $GITHUB_OUTPUT
+          echo "$output" > diff-output-truncated.txt
+          echo "is_truncated=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Find Existing Preview Comment
+      if: inputs.update_comment == 'true'
+      id: find-comment
+      uses: peter-evans/find-comment@v3
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        comment-author: "github-actions[bot]"
+        body-includes: "Preview changes for installation"
+
+    - name: Create or Update GitHub Comment
+      uses: actions/github-script@v7
+      env:
+        UPDATE_COMMENT: ${{ inputs.update_comment }}
+        COMMENT_ID: ${{ steps.find-comment.outputs.comment-id }}
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const fs = require('fs');
+
+          // Read diff output
+          const diffOutput = fs.readFileSync('diff-output-truncated.txt', 'utf8');
+
+          // Determine status
+          const hasError = '${{ steps.dryrun.outputs.has_error }}' === 'true';
+          const status = '${{ steps.dryrun.outputs.status }}';
+          const duration = '${{ steps.dryrun.outputs.duration }}';
+          const isTruncated = '${{ steps.dryrun.outputs.is_truncated }}' === 'true';
+
+          let statusIcon;
+          if (hasError) {
+            statusIcon = status === 'CANCELLED' ? '⚠️' : '❌';
+          } else {
+            statusIcon = '✅';
+          }
+
+          // Build comment body
+          let body = `${statusIcon} Preview changes for installation \`${{ inputs.installation }}\` in environment \`${{ inputs.environment }}\` using version \`${{ inputs.version }}\` (${duration})\n\n`;
+
+          if (isTruncated) {
+            const dashboardLink = `https://control.ryvn.app/environments/${{ inputs.environment }}/installations/${{ inputs.installation }}`;
+            body += `> **Note**: Output was truncated due to size. View full output in [Ryvn Dashboard](${dashboardLink}).\n\n`;
+          }
+
+          // Use ANSI code block for colored output
+          body += '```ansi\n';
+          body += diffOutput;
+          body += '\n```\n';
+
+          body += `\n<sub>Preview for commit ${context.sha.substring(0, 7)}</sub>`;
+
+          // Create or update comment
+          const shouldUpdate = process.env.UPDATE_COMMENT === 'true' && process.env.COMMENT_ID;
+
+          if (shouldUpdate) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: process.env.COMMENT_ID,
+              body: body
+            });
+            console.log(`Updated comment ${process.env.COMMENT_ID}`);
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+            console.log('Created new comment');
+          }
+
+          // Clean up
+          fs.unlinkSync('diff-output-truncated.txt');
+          if (fs.existsSync('diff-output.txt')) {
+            fs.unlinkSync('diff-output.txt');
+          }
+          if (fs.existsSync('dry-run-output.json')) {
+            fs.unlinkSync('dry-run-output.json');
+          }
+
+branding:
+  icon: "eye"
+  color: "purple"
