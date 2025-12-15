@@ -4,16 +4,15 @@ Runs a dry-run command and posts the diff/plan as a pull request comment. Shows 
 
 ## Inputs
 
-| Input                | Description                                     | Required | Default  |
-| -------------------- | ----------------------------------------------- | -------- | -------- |
-| `version`            | Release version to preview                      | Yes      | -        |
-| `environment`        | Environment name                                | Yes      | -        |
-| `installation`       | Installation name                               | Yes      | -        |
-| `ryvn_client_id`     | Ryvn Client ID for authentication               | Yes      | -        |
-| `ryvn_client_secret` | Ryvn Client Secret for authentication           | Yes      | -        |
-| `github_token`       | GitHub token for posting comments               | Yes      | -        |
-| `update_comment`     | Update existing comment instead of creating new | No       | `"true"` |
-| `timeout`            | Timeout for watching task                       | No       | `"10m"`  |
+| Input                | Description                           | Required | Default |
+| -------------------- | ------------------------------------- | -------- | ------- |
+| `version`            | Release version to preview            | Yes      | -       |
+| `environment`        | Environment name                      | Yes      | -       |
+| `installation`       | Installation name                     | Yes      | -       |
+| `ryvn_client_id`     | Ryvn Client ID for authentication     | Yes      | -       |
+| `ryvn_client_secret` | Ryvn Client Secret for authentication | Yes      | -       |
+| `github_token`       | GitHub token for posting comments     | Yes      | -       |
+| `timeout`            | Timeout for watching task             | No       | `"10m"` |
 
 ## Usage
 
@@ -80,13 +79,13 @@ jobs:
 
 ```yaml
 permissions:
-  pull-requests: write # Create/update comments
+  pull-requests: write # Create comments
   contents: read # Access repository
 ```
 
 ## Output
 
-Posts a comment showing changes with colored diff output:
+Creates a new comment on the PR showing changes with colored diff output:
 
 ````
 ✅ Preview changes for installation `my-app` in environment `staging` using version `v1.2.3` (5s)
@@ -100,5 +99,9 @@ observability, alloy, ClusterRole (rbac.authorization.k8s.io) has changed:
 
 ```
 
-Large outputs are automatically truncated with a link to the full output in the Ryvn Dashboard.
+## Notes
+
+- A new comment is created each time the action runs
+- Large outputs (>60KB) are automatically truncated with a link to the full output in the Ryvn Dashboard
+- ANSI color codes are preserved in the diff output for better readability
 ```
